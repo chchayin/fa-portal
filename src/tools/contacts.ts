@@ -1,4 +1,4 @@
-import { faGet } from '../client.js'
+import { faGet, faPost } from '../client.js'
 
 export interface Contact {
   id: number
@@ -78,4 +78,63 @@ export async function resolveContact(
     )
   }
   return contact
+}
+
+// ─── Create contact ──────────────────────────────────────────────────
+
+export interface CreateContactFields {
+  name: string
+  contactType: 'customer' | 'supplier'
+  taxId?: string
+  branch?: string
+  addressLocal?: string
+  zipCode?: string
+  contactPerson?: string
+  email?: string
+  mobile?: string
+  office?: string
+  fax?: string
+  defaultCreditDays?: number
+  shippingAddress?: string
+  bankId?: number
+  bankAccountName?: string
+  bankAccountNumber?: string
+  bankBranch?: string
+  bankBranchCode?: string
+  bankAccountType?: number
+  isForeignBase?: boolean
+}
+
+export async function createContact(fields: CreateContactFields) {
+  const contactType = fields.contactType === 'customer' ? 3 : 5
+
+  const body = {
+    id: 0,
+    name: fields.name,
+    contactType,
+    contactGroup: contactType,
+    taxId: fields.taxId ?? '',
+    branch: fields.branch ?? '',
+    addressLocal: fields.addressLocal ?? '',
+    addressLocalLine2: null,
+    addressLocalLine3: null,
+    zipCode: fields.zipCode ?? '',
+    contactPerson: fields.contactPerson ?? '',
+    email: fields.email ?? '',
+    mobile: fields.mobile ?? '',
+    office: fields.office ?? '',
+    fax: fields.fax ?? '',
+    defaultCreditDays: String(fields.defaultCreditDays ?? 30),
+    shippingAddress: fields.shippingAddress ?? '',
+    isForeignBase: fields.isForeignBase ?? false,
+    media: [],
+    bankId: fields.bankId ?? 0,
+    bankAccountName: fields.bankAccountName ?? '',
+    bankAccountNumber: fields.bankAccountNumber ?? '',
+    bankBranch: fields.bankBranch ?? '',
+    bankBranchCode: fields.bankBranchCode ?? '',
+    bankAccountType: fields.bankAccountType ?? 1,
+  }
+
+  return faPost('/api/th/contacts', body)
 }

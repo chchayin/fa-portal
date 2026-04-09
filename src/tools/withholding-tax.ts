@@ -1,6 +1,6 @@
 import { faGet, faPost } from '../client.js'
 import { resolveContact } from './contacts.js'
-import { buildListParams, toDocDate } from './document.js'
+import { buildListParams, toDocDate, getNextSerial, getDefaultWarehouseId } from './document.js'
 
 const BASE = '/api/th/withholding-taxes'
 
@@ -30,7 +30,11 @@ export async function createWithholdingTax(fields: {
   salesId?: number
   showSignatureOrStamp?: boolean
 }) {
-  const contact = await resolveContact(fields.contactName, fields.contactId, 5)
+  const [contact, documentSerial, warehouseId] = await Promise.all([
+    resolveContact(fields.contactName, fields.contactId, 5),
+    getNextSerial(BASE, fields.publishedOn),
+    getDefaultWarehouseId(),
+  ])
   const publishedOn = toDocDate(fields.publishedOn)
 
   // fields.amount = base amount before VAT (taxAmountNoVat)
@@ -41,20 +45,37 @@ export async function createWithholdingTax(fields: {
   const itemTotal = r2(taxAmount - withheld)         // net to pay after WHT
 
   return faPost(BASE, {
-    documentType: 17,
-    recordId: 0,
     isComplieAccountingRule: false,
     documentContactCompanyChangeType: 7,
     isReCalculate: false,
+    documentType: 17,
+    recordId: 0,
+    documentSerial,
+    contactCode: null,
     contactId: contact.id,
     contactName: contact.name,
     contactAddress: contact.addressLocal ?? '',
+    contactAddressLine2: null,
+    contactAddressLine3: null,
     contactOriginAddress: contact.addressLocal ?? '',
+    contactShippingAddress: '',
+    contactNumber: contact.contactNumber ?? '',
+    contactNumberOffice: '',
+    contactFax: '',
     contactTaxId: contact.taxId ?? '',
     contactBranch: contact.branch ?? '',
     contactZipCode: contact.zipCode ?? '',
     contactPerson: contact.contactPerson ?? '',
     contactEmail: contact.email ?? '',
+    contactGroup: 5,
+    contactBankId: 0,
+    contactBankName: null,
+    contactBankBranch: null,
+    contactBankBranchCode: null,
+    contactBankAccountName: null,
+    contactBankAccountNumber: null,
+    contactBankAccountType: null,
+    contactQRCodeURL: '',
     publishedOn,
     dueDate: publishedOn,
     discount: 0,
@@ -79,6 +100,7 @@ export async function createWithholdingTax(fields: {
     companyStateChange: false,
     totalTaxWithheld: withheld,
     taxPayment: 1,
+    warehouseId,
     ...(fields.projectId != null && { projectId: fields.projectId }),
     ...(fields.salesId != null && { salesId: fields.salesId }),
     ...(fields.showSignatureOrStamp != null && { showSignatureOrStamp: fields.showSignatureOrStamp }),

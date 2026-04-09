@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "flowaccount": {
+      "command": "node",
+      "args": ["/Users/chayin/Developer/fa-portal/dist/index.js"],
+      "env": {
+        "FA_HEADLESS": "true"
+      }
+    }
+  }
+}

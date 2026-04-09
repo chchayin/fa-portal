@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { getSession, refreshSession } from './auth.js'
 import { faGet, faUpload } from './client.js'
-import { searchContacts } from './tools/contacts.js'
+import { searchContacts, createContact } from './tools/contacts.js'
 import {
   listPurchaseOrders,
   getPurchaseOrder,
@@ -29,6 +29,11 @@ import {
   getWithholdingTax,
   createWithholdingTax,
 } from './tools/withholding-tax.js'
+import {
+  listQuotations,
+  getQuotation,
+  createQuotation,
+} from './tools/quotations.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -37,6 +42,35 @@ const server = new McpServer({
   name: 'flowaccount',
   version: pkg.version,
 })
+
+// ─── Logging helper ──────────────────────────────────────────────────
+
+const log = (tag: string, ...args: unknown[]) =>
+  console.error(`[${new Date().toISOString()}] [${tag}]`, ...args)
+
+type ToolResult = { content: { type: 'text'; text: string }[] }
+
+function withLogging<T extends Record<string, unknown>>(
+  toolName: string,
+  handler: (args: T) => Promise<ToolResult>,
+): (args: T) => Promise<ToolResult> {
+  return async (args: T) => {
+    const start = Date.now()
+    log(toolName, '→ called', JSON.stringify(args, null, 2))
+    try {
+      const result = await handler(args)
+      const ms = Date.now() - start
+      const text = result.content[0]?.text ?? ''
+      const preview = text.length > 200 ? text.slice(0, 200) + '...' : text
+      log(toolName, `✓ ${ms}ms`, preview)
+      return result
+    } catch (err) {
+      const ms = Date.now() - start
+      log(toolName, `✗ ${ms}ms ERROR:`, err instanceof Error ? err.message : err)
+      throw err
+    }
+  }
+}
 
 // ─── Shared Zod schemas ───────────────────────────────────────────────
 
@@ -63,7 +97,7 @@ server.tool(
   'check_session',
   'Check if the FlowAccount session is active and valid',
   {},
-  async () => {
+  withLogging('check_session', async () => {
     try {
       const session = await getSession()
       const age = Math.round((Date.now() - session.extractedAt) / 60000)
@@ -75,14 +109,14 @@ server.tool(
         content: [{ type: 'text', text: `✗ Session error: ${err instanceof Error ? err.message : String(err)}` }],
       }
     }
-  }
+  })
 )
 
 server.tool(
   'refresh_session',
   'Force re-login to FlowAccount and refresh session cookies',
   {},
-  async () => {
+  withLogging('refresh_session', async () => {
     try {
       await refreshSession()
       return {
@@ -93,7 +127,7 @@ server.tool(
         content: [{ type: 'text', text: `✗ Login failed: ${err instanceof Error ? err.message : String(err)}` }],
       }
     }
-  }
+  })
 )
 
 // ─── Purchase Orders (ใบสั่งซื้อ) ─────────────────────────────────────
@@ -102,20 +136,20 @@ server.tool(
   'list_purchase_orders',
   'List purchase orders (ใบสั่งซื้อ) from FlowAccount',
   { ...ListParams, status: z.string().optional().describe('Filter by status') },
-  async (args) => {
+  withLogging('list_purchase_orders', async (args) => {
     const data = await listPurchaseOrders(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
   'get_purchase_order',
   'Get a single purchase order by ID',
   { id: z.string().describe('Purchase order ID') },
-  async ({ id }) => {
+  withLogging('get_purchase_order', async ({ id }) => {
     const data = await getPurchaseOrder(id)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
@@ -134,10 +168,55 @@ server.tool(
     salesId: z.number().int().optional().describe('Sales person ID'),
     showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document'),
   },
-  async (args) => {
+  withLogging('create_purchase_order', async (args) => {
     const data = await createPurchaseOrder(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
+)
+
+// ─── Quotations (ใบเสนอราคา) ───────────────────────────────────────────
+
+server.tool(
+  'list_quotations',
+  'List quotations (ใบเสนอราคา) from FlowAccount',
+  { ...ListParams, status: z.string().optional().describe('Filter by status') },
+  withLogging('list_quotations', async (args) => {
+    const data = await listQuotations(args)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+)
+
+server.tool(
+  'get_quotation',
+  'Get a single quotation by ID',
+  { id: z.string().describe('Quotation ID') },
+  withLogging('get_quotation', async ({ id }) => {
+    const data = await getQuotation(id)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+)
+
+server.tool(
+  'create_quotation',
+  'Create a new quotation (ใบเสนอราคา) in FlowAccount',
+  {
+    contactName: z.string().describe('Customer name'),
+    contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
+    items: z.array(LineItemSchema).min(1).describe('Line items'),
+    note: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
+    remarks: z.string().optional().describe('External note on printed document (หมายเหตุ)'),
+    reference: z.string().optional().describe('Reference document number'),
+    publishedOn: z.string().optional().describe('Document date YYYY-MM-DD (default today)'),
+    dueDate: z.string().optional().describe('Due date YYYY-MM-DD (default today + 30 days)'),
+    creditDays: z.number().int().optional().describe('Credit days (default 30)'),
+    projectId: z.number().int().optional().describe('Project ID to associate this document with'),
+    salesId: z.number().int().optional().describe('Sales person ID'),
+    showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document (default true)'),
+  },
+  withLogging('create_quotation', async (args) => {
+    const data = await createQuotation(args)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
 )
 
 // ─── Billing Notes (ใบวางบิล) ─────────────────────────────────────────
@@ -145,21 +224,21 @@ server.tool(
 server.tool(
   'list_billing_notes',
   'List billing notes (ใบวางบิล) from FlowAccount',
-  { ...ListParams, status: z.string().optional() },
-  async (args) => {
+  { ...ListParams, status: z.string().optional().describe('Filter by status') },
+  withLogging('list_billing_notes', async (args) => {
     const data = await listBillingNotes(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
   'get_billing_note',
   'Get a single billing note by ID',
-  { id: z.string() },
-  async ({ id }) => {
+  { id: z.string().describe('Billing note ID') },
+  withLogging('get_billing_note', async ({ id }) => {
     const data = await getBillingNote(id)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
@@ -168,7 +247,7 @@ server.tool(
   {
     contactName: z.string().describe('Customer name'),
     contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
-    items: z.array(LineItemSchema).min(1),
+    items: z.array(LineItemSchema).min(1).describe('Line items'),
     dueDate: z.string().optional().describe('Due date YYYY-MM-DD'),
     publishedOn: z.string().optional().describe('Document date YYYY-MM-DD'),
     note: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
@@ -178,10 +257,10 @@ server.tool(
     salesId: z.number().int().optional().describe('Sales person ID'),
     showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document'),
   },
-  async (args) => {
+  withLogging('create_billing_note', async (args) => {
     const data = await createBillingNote(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Tax Invoices (ใบกำกับภาษี) ──────────────────────────────────────
@@ -190,20 +269,20 @@ server.tool(
   'list_tax_invoices',
   'List tax invoices (ใบกำกับภาษี) from FlowAccount',
   { ...ListParams },
-  async (args) => {
+  withLogging('list_tax_invoices', async (args) => {
     const data = await listTaxInvoices(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
   'get_tax_invoice',
   'Get a single tax invoice by ID',
-  { id: z.string() },
-  async ({ id }) => {
+  { id: z.string().describe('Tax invoice ID') },
+  withLogging('get_tax_invoice', async ({ id }) => {
     const data = await getTaxInvoice(id)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
@@ -212,7 +291,7 @@ server.tool(
   {
     contactName: z.string().describe('Customer name'),
     contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
-    items: z.array(LineItemSchema).min(1),
+    items: z.array(LineItemSchema).min(1).describe('Line items'),
     dueDate: z.string().optional().describe('Due date YYYY-MM-DD'),
     publishedOn: z.string().optional().describe('Document date YYYY-MM-DD'),
     note: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
@@ -222,10 +301,10 @@ server.tool(
     salesId: z.number().int().optional().describe('Sales person ID'),
     showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document'),
   },
-  async (args) => {
+  withLogging('create_tax_invoice', async (args) => {
     const data = await createTaxInvoice(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Cash Invoices (ใบเสร็จรับเงิน) ─────────────────────────────────
@@ -234,10 +313,10 @@ server.tool(
   'list_cash_invoices',
   'List cash invoices (ใบเสร็จรับเงิน) from FlowAccount',
   { ...ListParams },
-  async (args) => {
+  withLogging('list_cash_invoices', async (args) => {
     const data = await listCashInvoices(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
@@ -246,9 +325,9 @@ server.tool(
   {
     contactName: z.string().describe('Customer name'),
     contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
-    items: z.array(LineItemSchema).min(1),
-    dueDate: z.string().optional(),
-    publishedOn: z.string().optional(),
+    items: z.array(LineItemSchema).min(1).describe('Line items'),
+    dueDate: z.string().optional().describe('Due date YYYY-MM-DD'),
+    publishedOn: z.string().optional().describe('Document date YYYY-MM-DD'),
     note: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
     remarks: z.string().optional().describe('External note on printed document (หมายเหตุ)'),
     reference: z.string().optional().describe('Reference document number'),
@@ -256,10 +335,10 @@ server.tool(
     salesId: z.number().int().optional().describe('Sales person ID'),
     showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document'),
   },
-  async (args) => {
+  withLogging('create_cash_invoice', async (args) => {
     const data = await createCashInvoice(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Contacts ─────────────────────────────────────────────────────────
@@ -271,11 +350,42 @@ server.tool(
     name: z.string().describe('Contact name to search'),
     contactType: z.enum(['customer', 'supplier', 'both']).optional().describe('Filter: customer, supplier, or both (default)'),
   },
-  async ({ name, contactType }) => {
+  withLogging('search_contacts', async ({ name, contactType }) => {
     const typeMap = { customer: 3, supplier: 5, both: 7 } as const
     const data = await searchContacts(name, typeMap[contactType ?? 'both'])
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
+)
+
+server.tool(
+  'create_contact',
+  'Create a new contact (customer or supplier) in FlowAccount. Only name and contactType are required — all other fields are optional.',
+  {
+    name: z.string().describe('Company or person name e.g. "บริษัท ABC จำกัด"'),
+    contactType: z.enum(['customer', 'supplier']).describe('customer (ลูกค้า) or supplier (ผู้ขาย)'),
+    taxId: z.string().optional().describe('Tax ID (เลขผู้เสียภาษี)'),
+    branch: z.string().optional().describe('Branch name e.g. "สำนักงานใหญ่"'),
+    addressLocal: z.string().optional().describe('Address (ที่อยู่)'),
+    zipCode: z.string().optional().describe('Zip code (รหัสไปรษณีย์)'),
+    contactPerson: z.string().optional().describe('Contact person name (ผู้ติดต่อ)'),
+    email: z.string().optional().describe('Email'),
+    mobile: z.string().optional().describe('Mobile phone'),
+    office: z.string().optional().describe('Office phone'),
+    fax: z.string().optional().describe('Fax number'),
+    defaultCreditDays: z.number().int().optional().describe('Default credit days (default 30)'),
+    shippingAddress: z.string().optional().describe('Shipping address (ที่อยู่จัดส่ง)'),
+    bankId: z.number().int().optional().describe('Bank ID (e.g. 5 = SCB)'),
+    bankAccountName: z.string().optional().describe('Bank account name'),
+    bankAccountNumber: z.string().optional().describe('Bank account number'),
+    bankBranch: z.string().optional().describe('Bank branch name'),
+    bankBranchCode: z.string().optional().describe('Bank branch code'),
+    bankAccountType: z.number().int().optional().describe('Bank account type (1 = savings, 2 = current)'),
+    isForeignBase: z.boolean().optional().describe('Is foreign contact (default false)'),
+  },
+  withLogging('create_contact', async (args) => {
+    const data = await createContact(args)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
 )
 
 // ─── Withholding Tax (ใบหัก ณ ที่จ่าย) ──────────────────────────────
@@ -284,20 +394,20 @@ server.tool(
   'list_withholding_tax',
   'List withholding tax certificates (ใบหัก ณ ที่จ่าย) from FlowAccount',
   { ...ListParams },
-  async (args) => {
+  withLogging('list_withholding_tax', async (args) => {
     const data = await listWithholdingTax(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
   'get_withholding_tax',
   'Get a single withholding tax certificate by ID',
-  { id: z.string() },
-  async ({ id }) => {
+  { id: z.string().describe('Withholding tax certificate ID') },
+  withLogging('get_withholding_tax', async ({ id }) => {
     const data = await getWithholdingTax(id)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 server.tool(
@@ -317,15 +427,16 @@ server.tool(
     salesId: z.number().int().optional().describe('Sales person ID'),
     showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document'),
   },
-  async (args) => {
+  withLogging('create_withholding_tax', async (args) => {
     const data = await createWithholdingTax(args)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Attach file to document ──────────────────────────────────────────
 
 const DOC_TYPE_PATH: Record<string, string> = {
+  'quotation': 'quotations',
   'purchase-order': 'purchase-orders',
   'billing-note': 'billing-notes',
   'tax-invoice': 'tax-invoices',
@@ -337,16 +448,16 @@ server.tool(
   'attach_file',
   'Attach a local file (PDF, image, etc.) to an existing FlowAccount document',
   {
-    documentType: z.enum(['purchase-order', 'billing-note', 'tax-invoice', 'cash-invoice', 'withholding-tax'])
+    documentType: z.enum(['quotation', 'purchase-order', 'billing-note', 'tax-invoice', 'cash-invoice', 'withholding-tax'])
       .describe('Type of document to attach the file to'),
     documentId: z.number().int().describe('Document recordId returned by the create tool'),
     filePath: z.string().describe('Absolute path to the file on disk e.g. /Users/you/Downloads/invoice.pdf'),
   },
-  async ({ documentType, documentId, filePath }) => {
+  withLogging('attach_file', async ({ documentType, documentId, filePath }) => {
     const docPath = DOC_TYPE_PATH[documentType]
     const data = await faUpload(`/api/th/${docPath}/${documentId}/update-document-attachment`, filePath)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Generic HTTP tool (for debugging / after API discovery) ─────────
@@ -358,10 +469,10 @@ server.tool(
     path: z.string().describe('Path starting with / e.g. /api/th/billing-notes'),
     params: z.record(z.string(), z.string()).optional().describe('Query parameters'),
   },
-  async ({ path, params }) => {
+  withLogging('fa_raw_get', async ({ path, params }) => {
     const data = await faGet(path, params as Record<string, string>)
     return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
-  }
+  })
 )
 
 // ─── Start server ─────────────────────────────────────────────────────

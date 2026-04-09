@@ -30,11 +30,6 @@ const FA_EMAIL = process.env.FA_EMAIL
 const FA_PASSWORD = process.env.FA_PASSWORD
 const FA_BASE_URL = process.env.FA_BASE_URL || 'https://app.flowaccount.com'
 
-if (!FA_EMAIL || !FA_PASSWORD) {
-  console.error('Error: FA_EMAIL and FA_PASSWORD must be set in .env')
-  process.exit(1)
-}
-
 interface CapturedRequest {
   method: string
   url: string
@@ -108,7 +103,7 @@ await page.goto(FA_BASE_URL, { waitUntil: 'networkidle' })
 const isLoginPage = page.url().includes('/login') || page.url().includes('/signin') ||
   await page.locator('input[type="email"], input[name="email"]').count() > 0
 
-if (isLoginPage) {
+if (isLoginPage && FA_EMAIL && FA_PASSWORD) {
   console.log('Logging in...')
   try {
     await page.locator('input[type="email"], input[name="email"]').fill(FA_EMAIL)
@@ -119,6 +114,10 @@ if (isLoginPage) {
   } catch (err) {
     console.error('Login failed. Please log in manually in the browser.')
   }
+} else if (isLoginPage) {
+  console.log('No credentials in .env — please log in manually in the browser.\n')
+  await page.waitForURL((url) => !url.toString().includes('/login') && !url.toString().includes('/signin'), { timeout: 0 })
+  console.log('Logged in!\n')
 } else {
   console.log('Already logged in.\n')
 }

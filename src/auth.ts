@@ -1,47 +1,34 @@
 import { chromium } from 'playwright'
-import { homedir, hostname, userInfo } from 'os'
-import { join } from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'fs'
-import { createCipheriv, createDecipheriv, scryptSync, randomBytes } from 'crypto'
+import { execFileSync } from 'child_process'
 
-// ─── Data directory & token file ─────────────────────────────────────
-
-const DATA_DIR = join(homedir(), '.fa-portal')
-const TOKEN_FILE = join(DATA_DIR, 'token.json')
 export const FA_API_BASE = 'https://api-core-canary.flowaccount.com'
 
-// ─── Token encryption (AES-256-GCM, machine-derived key) ────────────
+const KEYCHAIN_SERVICE = 'fa-portal'
+const KEYCHAIN_ACCOUNT = 'flowaccount-token'
 
-const ALGO = 'aes-256-gcm'
-const KEY_SALT = 'fa-portal-token-salt'
+// ─── macOS Keychain storage ─────────────────────────────────────────
 
-function deriveKey(): Buffer {
-  const identity = `${hostname()}:${userInfo().username}:fa-portal`
-  return scryptSync(identity, KEY_SALT, 32)
+function keychainSave(session: Session): void {
+  const payload = JSON.stringify({ token: session.token, extractedAt: session.extractedAt })
+  try {
+    // Delete existing entry first (ignore errors if not found)
+    execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT],
+      { stdio: 'ignore' })
+  } catch { /* not found — fine */ }
+  execFileSync('security', ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w', payload])
+  console.error('[auth] Token saved to macOS Keychain.')
 }
 
-function encryptToken(token: string): { iv: string; data: string; tag: string } {
-  const key = deriveKey()
-  const iv = randomBytes(16)
-  const cipher = createCipheriv(ALGO, key, iv)
-  const encrypted = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()])
-  const tag = cipher.getAuthTag()
-  return {
-    iv: iv.toString('hex'),
-    data: encrypted.toString('hex'),
-    tag: tag.toString('hex'),
+function keychainLoad(): Session | null {
+  try {
+    const raw = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'],
+      { encoding: 'utf8' }).trim()
+    const parsed = JSON.parse(raw) as { token: string; extractedAt: number }
+    if (!parsed.token || !parsed.extractedAt) return null
+    return { token: parsed.token, extractedAt: parsed.extractedAt }
+  } catch {
+    return null
   }
-}
-
-function decryptToken(enc: { iv: string; data: string; tag: string }): string {
-  const key = deriveKey()
-  const decipher = createDecipheriv(ALGO, key, Buffer.from(enc.iv, 'hex'))
-  decipher.setAuthTag(Buffer.from(enc.tag, 'hex'))
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(enc.data, 'hex')),
-    decipher.final(),
-  ])
-  return decrypted.toString('utf8')
 }
 
 // ─── Session type & cache ────────────────────────────────────────────
@@ -52,35 +39,6 @@ export interface Session {
 }
 
 let cached: Session | null = null
-
-// ─── Token persistence (encrypted at rest, chmod 600) ────────────────
-
-interface StoredToken {
-  iv: string
-  data: string
-  tag: string
-  extractedAt: number
-}
-
-function loadStoredToken(): Session | null {
-  try {
-    if (!existsSync(TOKEN_FILE)) return null
-    const stored = JSON.parse(readFileSync(TOKEN_FILE, 'utf8')) as StoredToken
-    if (!stored.iv || !stored.data || !stored.tag || !stored.extractedAt) return null
-    const token = decryptToken(stored)
-    return { token, extractedAt: stored.extractedAt }
-  } catch {
-    return null
-  }
-}
-
-function saveToken(session: Session) {
-  mkdirSync(DATA_DIR, { recursive: true })
-  const encrypted = encryptToken(session.token)
-  const stored: StoredToken = { ...encrypted, extractedAt: session.extractedAt }
-  writeFileSync(TOKEN_FILE, JSON.stringify(stored, null, 2))
-  chmodSync(TOKEN_FILE, 0o600)
-}
 
 // ─── Browser login (interactive only) ────────────────────────────────
 
@@ -119,25 +77,23 @@ async function loginViaBrowser(): Promise<Session> {
     clearTimeout?.()
 
     const session: Session = { token, extractedAt: Date.now() }
-    saveToken(session)
-    console.error('[auth] Token saved. Browser closed. Ready.')
+    keychainSave(session)
     return session
   } finally {
-    await browser.close()
+    await browser.close().catch(() => {})
+    console.error('[auth] Browser closed.')
   }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-const SESSION_TTL = 22 * 60 * 60 * 1000 // 22 hours
-
 export async function getSession(): Promise<Session> {
   // 1. In-memory cache
-  if (cached && Date.now() - cached.extractedAt < SESSION_TTL) return cached
+  if (cached) return cached
 
-  // 2. Persisted (encrypted) token file
-  const stored = loadStoredToken()
-  if (stored && Date.now() - stored.extractedAt < SESSION_TTL) {
+  // 2. macOS Keychain
+  const stored = keychainLoad()
+  if (stored) {
     cached = stored
     return cached
   }
