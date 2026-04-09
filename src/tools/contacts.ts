@@ -84,7 +84,7 @@ export async function resolveContact(
 
 export interface CreateContactFields {
   name: string
-  contactType: 'customer' | 'supplier'
+  contactType: 'customer' | 'supplier' | 'both'
   taxId?: string
   branch?: string
   addressLocal?: string
@@ -106,13 +106,14 @@ export interface CreateContactFields {
 }
 
 export async function createContact(fields: CreateContactFields) {
-  const contactType = fields.contactType === 'customer' ? 3 : 5
+  const typeMap = { customer: 3, supplier: 5, both: 7 } as const
+  const contactType = typeMap[fields.contactType]
 
   const body = {
     id: 0,
     name: fields.name,
     contactType,
-    contactGroup: contactType,
+    contactGroup: 3,
     taxId: fields.taxId ?? '',
     branch: fields.branch ?? '',
     addressLocal: fields.addressLocal ?? '',
@@ -128,12 +129,14 @@ export async function createContact(fields: CreateContactFields) {
     shippingAddress: fields.shippingAddress ?? '',
     isForeignBase: fields.isForeignBase ?? false,
     media: [],
-    bankId: fields.bankId ?? 0,
-    bankAccountName: fields.bankAccountName ?? '',
-    bankAccountNumber: fields.bankAccountNumber ?? '',
-    bankBranch: fields.bankBranch ?? '',
-    bankBranchCode: fields.bankBranchCode ?? '',
-    bankAccountType: fields.bankAccountType ?? 1,
+    ...(fields.bankId != null && {
+      bankId: fields.bankId,
+      bankAccountName: fields.bankAccountName ?? '',
+      bankAccountNumber: fields.bankAccountNumber ?? '',
+      bankBranch: fields.bankBranch ?? '',
+      bankBranchCode: fields.bankBranchCode ?? '',
+      bankAccountType: fields.bankAccountType ?? 1,
+    }),
   }
 
   return faPost('/api/th/contacts', body)

@@ -362,7 +362,7 @@ server.tool(
   'Create a new contact (customer or supplier) in FlowAccount. Only name and contactType are required — all other fields are optional.',
   {
     name: z.string().describe('Company or person name e.g. "บริษัท ABC จำกัด"'),
-    contactType: z.enum(['customer', 'supplier']).describe('customer (ลูกค้า) or supplier (ผู้ขาย)'),
+    contactType: z.enum(['customer', 'supplier', 'both']).describe('customer (ลูกค้า), supplier (ผู้ขาย), or both'),
     taxId: z.string().optional().describe('Tax ID (เลขผู้เสียภาษี)'),
     branch: z.string().optional().describe('Branch name e.g. "สำนักงานใหญ่"'),
     addressLocal: z.string().optional().describe('Address (ที่อยู่)'),
