@@ -30,6 +30,11 @@ import {
   createWithholdingTax,
 } from './tools/withholding-tax.js'
 import {
+  listExpenses,
+  getExpense,
+  createExpense,
+} from './tools/expenses.js'
+import {
   listQuotations,
   getQuotation,
   createQuotation,
@@ -433,6 +438,62 @@ server.tool(
   })
 )
 
+// ─── Expenses (ค่าใช้จ่าย) ──────────────────────────────────────────
+
+server.tool(
+  'list_expenses',
+  'List expenses (ค่าใช้จ่าย) from FlowAccount',
+  { ...ListParams },
+  withLogging('list_expenses', async (args) => {
+    const data = await listExpenses(args)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+)
+
+server.tool(
+  'get_expense',
+  'Get a single expense by ID',
+  { id: z.string().describe('Expense record ID') },
+  withLogging('get_expense', async ({ id }) => {
+    const data = await getExpense(id)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+)
+
+const ExpenseItemSchema = z.object({
+  expenseDebitId: z.number().int().describe('Chart of account ID for debit side (e.g. 1873239 = 51220 ค่าพาหนะ). Look up via fa_raw_get.'),
+  expenseCreditId: z.number().int().describe('Chart of account ID for credit side (e.g. 1703961 = 21311 เจ้าหนี้การค้า-ทั่วไป). Look up via fa_raw_get.'),
+  expenseDescription: z.string().describe('Description shown on the line item'),
+  pricePerUnit: z.number().nonnegative().describe('Total amount in THB'),
+  quantity: z.number().positive().optional().describe('Quantity (default 1)'),
+  vatRate: z.number().optional().describe('VAT rate: 0 or 7 (default 0)'),
+  withHeldPerItem: z.number().optional().describe('Withholding tax amount per item (default 0)'),
+  unitId: z.number().int().optional().describe('Unit record ID (e.g. 371484 = "รายการ")'),
+  unitName: z.string().optional().describe('Unit label (default "รายการ")'),
+})
+
+server.tool(
+  'create_expense',
+  'Create a new expense (ค่าใช้จ่าย) in FlowAccount. Use fa_raw_get to look up expenseDebitId/expenseCreditId from an existing expense or chart of accounts — these are company-specific.',
+  {
+    contactName: z.string().describe('Vendor / supplier name'),
+    contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
+    items: z.array(ExpenseItemSchema).min(1).describe('Expense line items'),
+    publishedOn: z.string().optional().describe('Document date YYYY-MM-DD (default today)'),
+    dueDate: z.string().optional().describe('Due date YYYY-MM-DD (default publishedOn + creditDays)'),
+    creditDays: z.number().int().optional().describe('Credit days for due date calculation (default 0)'),
+    expenseCategoryViewType: z.number().int().optional().describe('1 = standard single-category expense (default 1)'),
+    remarks: z.string().optional().describe('External note on printed document (หมายเหตุ)'),
+    internalNotes: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
+    salesId: z.number().int().optional().describe('Sales person ID'),
+    showSignatureOrStamp: z.boolean().optional().describe('Show signature/stamp on printed document (default true)'),
+  },
+  withLogging('create_expense', async (args) => {
+    const data = await createExpense(args)
+    return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  })
+)
+
 // ─── Attach file to document ──────────────────────────────────────────
 
 const DOC_TYPE_PATH: Record<string, string> = {
@@ -442,13 +503,14 @@ const DOC_TYPE_PATH: Record<string, string> = {
   'tax-invoice': 'tax-invoices',
   'cash-invoice': 'cash-invoices',
   'withholding-tax': 'withholding-taxes',
+  'expense': 'expenses',
 }
 
 server.tool(
   'attach_file',
   'Attach a local file (PDF, image, etc.) to an existing FlowAccount document',
   {
-    documentType: z.enum(['quotation', 'purchase-order', 'billing-note', 'tax-invoice', 'cash-invoice', 'withholding-tax'])
+    documentType: z.enum(['quotation', 'purchase-order', 'billing-note', 'tax-invoice', 'cash-invoice', 'withholding-tax', 'expense'])
       .describe('Type of document to attach the file to'),
     documentId: z.number().int().describe('Document recordId returned by the create tool'),
     filePath: z.string().describe('Absolute path to the file on disk e.g. /Users/you/Downloads/invoice.pdf'),

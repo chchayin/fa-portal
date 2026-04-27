@@ -24,6 +24,7 @@ Before creating any document, **always search for the contact first** using `sea
 | ใบกำกับภาษี | `*_tax_invoice*` | Tax invoices (VAT invoices) to customers |
 | ใบเสร็จรับเงิน | `*_cash_invoice*` | Cash invoices / receipts to customers |
 | ใบหัก ณ ที่จ่าย | `*_withholding_tax*` | Withholding tax certificates |
+| ค่าใช้จ่าย | `*_expense*` | Expenses (vendor payments, operating costs) |
 
 ## Common Workflow
 
@@ -56,10 +57,34 @@ This is different from other documents:
 - `taxRate`: WHT rate % (e.g. 3)
 - The system auto-calculates: gross = amount × 1.07, withheld = amount × taxRate%
 
+### Creating expenses (ค่าใช้จ่าย)
+
+Expenses use `documentType: 13` and have a different item structure from standard documents — each line item references chart-of-account IDs instead of product names.
+
+**Endpoint**: `POST /api/th/expenses`
+
+Required item fields:
+- `expenseDebitId` (number) — chart of account record ID for debit side (e.g. `1873239` = 51220 ค่าพาหนะ)
+- `expenseCreditId` (number) — chart of account record ID for credit side (e.g. `1703961` = 21311 เจ้าหนี้การค้า-ทั่วไป)
+- `expenseDescription` (string) — description shown on the line item
+- `pricePerUnit` (number) — amount in THB
+
+Optional item fields: `quantity` (default 1), `vatRate` (0 or 7, default 0 → sent as -1 "out of scope" to API), `withHeldPerItem` (default 0), `unitId`, `unitName` (default "รายการ")
+
+Optional document fields: `publishedOn`, `dueDate`, `creditDays` (for auto dueDate), `remarks`, `internalNotes`, `salesId`, `showSignatureOrStamp`, `expenseCategoryViewType` (default 1 = standard)
+
+**Important notes**:
+- `expenseDebitId` / `expenseCreditId` are **company-specific record IDs**, not account codes like "51220". To discover available IDs:
+  - `fa_raw_get("/api/th/expenses/categories/business")` — common expense categories with debitId/creditId pairs
+  - `fa_raw_get("/api/th/expenses/categories/accounting", { isCustom: "true" })` — full chart of accounts list
+  - `get_expense(id)` on an existing expense — inspect its `productItems` for the IDs used
+- All discount types must be consistent at `1` (percentage-based) across document and item level — the tool handles this automatically.
+- VAT rate `0` or omitted → sent as `-1` (out-of-scope VAT) to the API. Pass `7` for standard 7% VAT.
+
 ### Attaching files
 
 Use `attach_file` to upload PDF/images to an existing document:
-- `documentType`: `quotation`, `purchase-order`, `billing-note`, `tax-invoice`, `cash-invoice`, `withholding-tax`
+- `documentType`: `quotation`, `purchase-order`, `billing-note`, `tax-invoice`, `cash-invoice`, `withholding-tax`, `expense`
 - `documentId`: the `recordId` returned when creating the document
 - `filePath`: absolute path to the file on disk
 
