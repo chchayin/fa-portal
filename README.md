@@ -32,7 +32,27 @@ npx playwright install chromium
 
 ### 3. Configure your MCP client
 
-The repo ships a `.mcp.json` with an **absolute path that will not match your machine**. Edit it to point at your own checkout:
+**Claude Code** — the repo ships a project-scoped `.mcp.json` that uses a path
+relative to the repo root, so it needs no editing:
+
+```json
+{
+  "mcpServers": {
+    "flowaccount": {
+      "command": "node",
+      "args": ["dist/index.js"]
+    }
+  }
+}
+```
+
+Because that path is relative, **start Claude Code from the repo root**. If you
+launch it from a subdirectory and the server fails with
+`Cannot find module 'dist/index.js'`, that is why — either `cd` to the root, or
+swap in an absolute path.
+
+**Claude Desktop** — `claude_desktop_config.json` is global and has no project
+root to resolve against, so it needs the absolute path to your checkout:
 
 ```json
 {
@@ -44,8 +64,6 @@ The repo ships a `.mcp.json` with an **absolute path that will not match your ma
   }
 }
 ```
-
-For Claude Desktop, put the same block in `claude_desktop_config.json`.
 
 ### 4. First login
 
