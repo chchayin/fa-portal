@@ -8,27 +8,25 @@
  * Results are saved to api-map.json for use in building tool handlers.
  *
  * Steps:
- * 1. Make sure .env has FA_EMAIL and FA_PASSWORD
- * 2. Run: npm run discover
- * 3. Browser opens — navigate to each section you want to map:
+ * 1. Run: npm run discover
+ * 2. Browser opens — log in manually, then navigate to each section you want to map:
  *    - Purchase orders / quotations
  *    - Billing notes
  *    - Withholding tax
  *    - Try creating one document to capture POST payloads
- * 4. Close the browser or press Ctrl+C
- * 5. Check api-map.json for discovered endpoints
+ * 3. Close the browser or press Ctrl+C
+ * 4. Check api-map.json for discovered endpoints
+ *
+ * Login is interactive only — this script stores and reads no credentials.
  */
 
 import { chromium } from 'playwright'
 import * as fs from 'fs'
 import * as path from 'path'
-import { config } from 'dotenv'
 
-config()
-
-const FA_EMAIL = process.env.FA_EMAIL
-const FA_PASSWORD = process.env.FA_PASSWORD
-const FA_BASE_URL = process.env.FA_BASE_URL || 'https://app.flowaccount.com'
+// Matches FA_API_BASE's origin in src/auth.ts so the capture reflects the app
+// the MCP server actually talks to.
+const FA_BASE_URL = 'https://advance.flowaccount.com'
 
 interface CapturedRequest {
   method: string
@@ -103,19 +101,8 @@ await page.goto(FA_BASE_URL, { waitUntil: 'networkidle' })
 const isLoginPage = page.url().includes('/login') || page.url().includes('/signin') ||
   await page.locator('input[type="email"], input[name="email"]').count() > 0
 
-if (isLoginPage && FA_EMAIL && FA_PASSWORD) {
-  console.log('Logging in...')
-  try {
-    await page.locator('input[type="email"], input[name="email"]').fill(FA_EMAIL)
-    await page.locator('input[type="password"], input[name="password"]').fill(FA_PASSWORD)
-    await page.locator('button[type="submit"], button:has-text("เข้าสู่ระบบ"), button:has-text("Login")').click()
-    await page.waitForURL((url) => !url.toString().includes('/login') && !url.toString().includes('/signin'), { timeout: 15000 })
-    console.log('Logged in successfully!\n')
-  } catch (err) {
-    console.error('Login failed. Please log in manually in the browser.')
-  }
-} else if (isLoginPage) {
-  console.log('No credentials in .env — please log in manually in the browser.\n')
+if (isLoginPage) {
+  console.log('Please log in manually in the browser...\n')
   await page.waitForURL((url) => !url.toString().includes('/login') && !url.toString().includes('/signin'), { timeout: 0 })
   console.log('Logged in!\n')
 } else {
