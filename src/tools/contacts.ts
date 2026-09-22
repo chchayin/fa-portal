@@ -52,9 +52,34 @@ export async function findContact(name: string, contactType: 3 | 5 | 7 = 7): Pro
 }
 
 /**
+ * Look up a contact by its FlowAccount id, returning the full record.
+ *
+ * FlowAccount exposes no per-record GET for contacts (the UI capture in
+ * api-map.json only ever hits /api/th/contacts/search), so the id is resolved
+ * by narrowing search results to an exact id match. The name hint is tried
+ * first, then the id itself as the search string, so a stale or wrong name
+ * hint still resolves. Returns null when no result carries that id.
+ */
+export async function findContactById(id: number, nameHint?: string): Promise<Contact | null> {
+  const queries: string[] = []
+  const hint = nameHint?.trim()
+  if (hint) queries.push(hint)
+  if (String(id) !== hint) queries.push(String(id))
+
+  for (const query of queries) {
+    const results = await searchContacts(query, 7)
+    const match = results.find(c => c.id === id)
+    if (match) return match
+  }
+  return null
+}
+
+/**
  * Resolve a contact for document creation.
- * - If contactId is given: search by name hint to get full data (address etc.);
- *   falls back to a stub if not found (FA backend will fill address from contactId).
+ * - If contactId is given: it is authoritative — the contact is looked up by
+ *   that id and an error is thrown if it cannot be resolved. Never returns a
+ *   blank-field stub, which would silently create a document with no address,
+ *   tax id or branch.
  * - If only name is given: look up by name with the given type filter.
  *
  * @param type  3 = customer, 5 = supplier (default)
@@ -65,11 +90,13 @@ export async function resolveContact(
   type: 3 | 5 = 5
 ): Promise<Contact> {
   if (id) {
-    const results = await searchContacts(name, 7)
-    const match = results.find(c => c.id === id)
+    const match = await findContactById(id, name)
     if (match) return match
-    // Stub: FA backend will populate address from contactId
-    return { id, name, addressLocal: '', contactNumber: null, taxId: null, branch: null, zipCode: null, contactPerson: null, email: null }
+    throw new Error(
+      `Contact id ${id} not found (searched for "${name}" and for "${id}"). ` +
+        `The contactId may be wrong, or the contact may not be reachable by that name. ` +
+        `Use search_contacts to confirm the contact's id and exact name before retrying.`
+    )
   }
   const contact = await findContact(name, type)
   if (!contact) {
