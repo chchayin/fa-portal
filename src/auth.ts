@@ -38,7 +38,32 @@ export interface Session {
   extractedAt: number
 }
 
+/**
+ * FlowAccount bearer tokens stay usable for roughly 22 hours.
+ * Anything older than this is treated as absent, not as a valid session.
+ */
+export const SESSION_TTL_MS = 22 * 60 * 60 * 1000
+
+/** Non-interactive view of session state — see peekSession(). */
+export interface SessionStatus {
+  state: 'none' | 'expired' | 'valid'
+  session: Session | null
+  /** Milliseconds since the token was captured (null when there is no token). */
+  ageMs: number | null
+  /** Milliseconds left before the token hits the TTL (0 when expired, null when absent). */
+  remainingMs: number | null
+  /** True while an interactive browser login is already running. */
+  loginInProgress: boolean
+}
+
 let cached: Session | null = null
+
+/** Shared promise for an interactive login that is currently running. */
+let loginInFlight: Promise<Session> | null = null
+
+function isExpired(session: Session): boolean {
+  return Date.now() - session.extractedAt >= SESSION_TTL_MS
+}
 
 // ─── Browser login (interactive only) ────────────────────────────────
 
@@ -85,26 +110,86 @@ async function loginViaBrowser(): Promise<Session> {
   }
 }
 
-// ─── Public API ──────────────────────────────────────────────────────
-
-export async function getSession(): Promise<Session> {
-  // 1. In-memory cache
-  if (cached) return cached
-
-  // 2. macOS Keychain
-  const stored = keychainLoad()
-  if (stored) {
-    cached = stored
-    return cached
+/**
+ * Start an interactive login, or join the one already running.
+ *
+ * Callers never touch loginViaBrowser directly: only one Chromium window may
+ * exist at a time, and every concurrent caller resolves with the same Session.
+ * The in-flight promise is cleared once it settles — success or failure — so a
+ * later refresh always gets a fresh browser login and a rejected attempt is
+ * never cached.
+ */
+function startLogin(): Promise<Session> {
+  if (loginInFlight) {
+    console.error('[auth] Login already in progress — joining it.')
+    return loginInFlight
   }
 
-  // 3. Interactive browser login
-  cached = await loginViaBrowser()
-  return cached
+  const attempt: Promise<Session> = loginViaBrowser()
+    .then((session) => {
+      cached = session
+      return session
+    })
+    .finally(() => {
+      if (loginInFlight === attempt) loginInFlight = null
+    })
+
+  loginInFlight = attempt
+  return attempt
+}
+
+// ─── Public API ──────────────────────────────────────────────────────
+
+/**
+ * Report session state without ever opening a browser.
+ * Consults the in-memory cache first, then the Keychain.
+ */
+export function peekSession(): SessionStatus {
+  const session = cached ?? keychainLoad()
+  const loginInProgress = loginInFlight !== null
+
+  if (!session) {
+    return { state: 'none', session: null, ageMs: null, remainingMs: null, loginInProgress }
+  }
+
+  const ageMs = Date.now() - session.extractedAt
+  if (ageMs >= SESSION_TTL_MS) {
+    return { state: 'expired', session, ageMs, remainingMs: 0, loginInProgress }
+  }
+
+  return { state: 'valid', session, ageMs, remainingMs: SESSION_TTL_MS - ageMs, loginInProgress }
+}
+
+export async function getSession(): Promise<Session> {
+  // 1. In-memory cache — only if still inside the TTL
+  if (cached && !isExpired(cached)) return cached
+  cached = null
+
+  // 2. macOS Keychain — a stored token past the TTL counts as no token at all
+  const stored = keychainLoad()
+  if (stored) {
+    if (!isExpired(stored)) {
+      cached = stored
+      return cached
+    }
+    console.error('[auth] Stored token is past its 22h TTL — re-login required.')
+  }
+
+  // 3. Interactive browser login (deduplicated across concurrent callers)
+  return startLogin()
 }
 
 export async function refreshSession(): Promise<Session> {
+  // Join a login that is already open rather than racing a second window.
+  if (loginInFlight) {
+    console.error('[auth] Login already in progress — joining it.')
+    return loginInFlight
+  }
+
+  // No login running: drop the stale token and start one. Nothing can observe
+  // the null cache before loginInFlight is set — startLogin assigns it in this
+  // same synchronous turn, so getSession() can never slip in and open its own
+  // browser window.
   cached = null
-  cached = await loginViaBrowser()
-  return cached
+  return startLogin()
 }

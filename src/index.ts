@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-import 'dotenv/config'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { getSession, refreshSession } from './auth.js'
+import { getSession, refreshSession, peekSession, SESSION_TTL_MS } from './auth.js'
 import { faGet, faUpload } from './client.js'
 import { searchContacts, createContact } from './tools/contacts.js'
 import {
@@ -103,17 +102,22 @@ server.tool(
   'Check if the FlowAccount session is active and valid',
   {},
   withLogging('check_session', async () => {
-    try {
-      const session = await getSession()
-      const age = Math.round((Date.now() - session.extractedAt) / 60000)
-      return {
-        content: [{ type: 'text', text: `✓ Session active. Bearer token present. Age: ${age} min.` }],
-      }
-    } catch (err) {
-      return {
-        content: [{ type: 'text', text: `✗ Session error: ${err instanceof Error ? err.message : String(err)}` }],
-      }
+    // Read-only: peekSession() never opens a browser, so this tool cannot
+    // trigger an interactive login as a side effect of being asked for status.
+    const status = peekSession()
+    const mins = (ms: number) => Math.round(ms / 60000)
+    const pending = status.loginInProgress ? ' (a browser login is currently open)' : ''
+
+    let text: string
+    if (status.state === 'none') {
+      text = `✗ No session stored. Run refresh_session to log in.${pending}`
+    } else if (status.state === 'expired') {
+      text = `✗ Session expired. Token age: ${mins(status.ageMs!)} min (TTL ${mins(SESSION_TTL_MS)} min). Run refresh_session to log in again.${pending}`
+    } else {
+      text = `✓ Session active. Bearer token present. Age: ${mins(status.ageMs!)} min, ${mins(status.remainingMs!)} min remaining.${pending}`
     }
+
+    return { content: [{ type: 'text', text }] }
   })
 )
 
