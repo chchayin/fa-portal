@@ -4,8 +4,8 @@ You have access to a FlowAccount (Thai cloud accounting) MCP server called `flow
 
 ## Session
 
-- Always start by calling `check_session` to verify the session is active.
-- If the session is expired or errors, call `refresh_session` — a browser window will open for the user to log in manually.
+- Always start by calling `check_session` to verify the session is active. It is read-only and safe to call at any time — it never opens a browser, and reports one of three states: no session stored, expired (with the token's age), or active.
+- If it reports expired or no session, call `refresh_session` — a browser window will open for the user to log in manually. Tokens last 22 hours.
 
 ## Contact Lookup (IMPORTANT)
 
@@ -13,6 +13,10 @@ Before creating any document, **always search for the contact first** using `sea
 
 - `search_contacts(name, contactType?)` — contactType: `customer`, `supplier`, or `both` (default)
 - If the user gives a partial name, search for it and confirm the match before proceeding.
+
+**Pass `contactName` exactly as `search_contacts` returned it.** When you supply a `contactId` it is treated as authoritative: the server resolves the contact by that id and **throws an error** if it cannot find it. It no longer falls back to a blank contact record, which used to silently produce documents with an empty address, tax id and branch.
+
+If you get `Contact id <n> not found`, the id is wrong or the contact is not reachable under that name — re-run `search_contacts` to get both the correct id and its exact name rather than guessing either one.
 
 ## Document Types
 
@@ -96,7 +100,7 @@ Use `attach_file` to upload PDF/images to an existing document:
 
 1. **Always search contacts first** — don't guess contact names.
 2. **Set date ranges when listing** — default is today only, so older docs won't appear without explicit dates.
-3. **Use contactId over contactName** — more reliable, avoids ambiguity.
+3. **Use contactId over contactName** — more reliable, avoids ambiguity. Send the `name` exactly as returned by `search_contacts`; a mismatched id/name pair now errors instead of silently creating an incomplete document.
 4. **For WHT income types** — inspect an existing WHT doc first to get the correct code.
 5. **Confirm with the user** before creating any document — show them the details (contact, items, amounts) and ask for confirmation.
 6. **Respond in Thai** when the user writes in Thai.
