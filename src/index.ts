@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { getSession, refreshSession, peekSession, SESSION_TTL_MS } from './auth.js'
+import { refreshSession, peekSession, SESSION_TTL_MS } from './auth.js'
 import { faGet, faUpload } from './client.js'
 import { searchContacts, createContact } from './tools/contacts.js'
 import {
@@ -546,13 +546,21 @@ server.tool(
 async function main() {
   console.error('[fa-portal] Starting FlowAccount MCP server...')
 
-  // Pre-warm: login on startup
-  try {
-    await getSession()
-    console.error('[fa-portal] Ready.')
-  } catch (err) {
-    console.error('[fa-portal] Warning: Could not pre-login:', err instanceof Error ? err.message : err)
-    console.error('[fa-portal] Server will try again on first tool call.')
+  // Startup must never log in. An interactive browser login takes as long as a
+  // human takes, and anything awaited here delays server.connect() below — the
+  // client gives up on the MCP handshake (CONNECT_TIMEOUT) long before the
+  // login window is answered. Report what we have and connect immediately;
+  // the first tool call that actually needs the API will log in lazily.
+  const status = peekSession()
+  const mins = (ms: number) => Math.round(ms / 60000)
+  if (status.state === 'valid') {
+    console.error(`[fa-portal] Ready. Session valid, ${mins(status.remainingMs!)} min remaining.`)
+  } else if (status.state === 'expired') {
+    console.error(`[fa-portal] Ready. Stored session expired (${mins(status.ageMs!)} min old).`)
+    console.error('[fa-portal] Call refresh_session to log in — no browser will open until you do.')
+  } else {
+    console.error('[fa-portal] Ready. No stored session.')
+    console.error('[fa-portal] Call refresh_session to log in — no browser will open until you do.')
   }
 
   const transport = new StdioServerTransport()

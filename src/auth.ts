@@ -1,34 +1,116 @@
 import { chromium } from 'playwright'
 import { execFileSync } from 'child_process'
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 
 export const FA_API_BASE = 'https://api-core-canary.flowaccount.com'
 
 const KEYCHAIN_SERVICE = 'fa-portal'
 const KEYCHAIN_ACCOUNT = 'flowaccount-token'
+const KEYCHAIN_STATE_KEY = 'flowaccount-state-key'
+
+/** Where the encrypted Playwright storageState lives (the key is in the Keychain). */
+const STATE_DIR = join(homedir(), '.fa-portal')
+const STATE_FILE = join(STATE_DIR, 'state.enc')
+
+/** Cap on the silent (headless) re-auth before we fall back to asking the user. */
+const SILENT_REFRESH_TIMEOUT_MS = 45_000
 
 // ─── macOS Keychain storage ─────────────────────────────────────────
 
-function keychainSave(session: Session): void {
-  const payload = JSON.stringify({ token: session.token, extractedAt: session.extractedAt })
+/**
+ * Write a secret to the Keychain through stdin rather than argv.
+ *
+ * `security add-generic-password -w <value>` would put the secret on the
+ * command line, where any local process can read it out of `ps`. Given no
+ * value, the tool prompts for it and asks for a retype, so sending the value
+ * twice on stdin stores it without it ever appearing in argv. Values are
+ * capped around 128 bytes by this path, which is why only small secrets (the
+ * token, the state encryption key) live here.
+ */
+function keychainSaveSecret(account: string, value: string): void {
   try {
-    // Delete existing entry first (ignore errors if not found)
-    execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT],
+    execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account],
       { stdio: 'ignore' })
   } catch { /* not found — fine */ }
-  execFileSync('security', ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w', payload])
+  execFileSync('security', ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'],
+    { input: `${value}\n${value}\n`, stdio: ['pipe', 'ignore', 'ignore'] })
+}
+
+function keychainLoadSecret(account: string): string | null {
+  try {
+    return execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'],
+      { encoding: 'utf8' }).trim()
+  } catch {
+    return null
+  }
+}
+
+function keychainSave(session: Session): void {
+  keychainSaveSecret(KEYCHAIN_ACCOUNT, JSON.stringify({ token: session.token, extractedAt: session.extractedAt }))
   console.error('[auth] Token saved to macOS Keychain.')
 }
 
 function keychainLoad(): Session | null {
+  const raw = keychainLoadSecret(KEYCHAIN_ACCOUNT)
+  if (!raw) return null
   try {
-    const raw = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'],
-      { encoding: 'utf8' }).trim()
     const parsed = JSON.parse(raw) as { token: string; extractedAt: number }
     if (!parsed.token || !parsed.extractedAt) return null
     return { token: parsed.token, extractedAt: parsed.extractedAt }
   } catch {
     return null
   }
+}
+
+// ─── Encrypted storageState ──────────────────────────────────────────
+
+/**
+ * Playwright's storageState (cookies + localStorage) is what makes a silent
+ * re-auth possible, and it is password-equivalent: anyone holding it is logged
+ * in as you. It runs to tens of KB, far past what the Keychain stdin path
+ * accepts, so it is stored as AES-256-GCM ciphertext in a 0600 file while the
+ * key itself lives in the Keychain. Losing either half makes the file useless.
+ */
+function stateKey(): Buffer {
+  const existing = keychainLoadSecret(KEYCHAIN_STATE_KEY)
+  if (existing && /^[0-9a-f]{64}$/.test(existing)) return Buffer.from(existing, 'hex')
+  const key = randomBytes(32)
+  keychainSaveSecret(KEYCHAIN_STATE_KEY, key.toString('hex'))
+  return key
+}
+
+function saveStorageState(state: unknown): void {
+  try {
+    const iv = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', stateKey(), iv)
+    const body = Buffer.concat([cipher.update(JSON.stringify(state), 'utf8'), cipher.final()])
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+    writeFileSync(STATE_FILE, Buffer.concat([iv, cipher.getAuthTag(), body]), { mode: 0o600 })
+    chmodSync(STATE_FILE, 0o600)
+  } catch (err) {
+    console.error('[auth] Could not save browser state:', err instanceof Error ? err.message : err)
+  }
+}
+
+function loadStorageState(): unknown | null {
+  if (!existsSync(STATE_FILE)) return null
+  try {
+    const raw = readFileSync(STATE_FILE)
+    const decipher = createDecipheriv('aes-256-gcm', stateKey(), raw.subarray(0, 12))
+    decipher.setAuthTag(raw.subarray(12, 28))
+    return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'))
+  } catch {
+    // Wrong key, truncated or tampered file — treat as absent.
+    return null
+  }
+}
+
+/** Drop the saved browser state, e.g. once it no longer authenticates. */
+export function clearStorageState(): void {
+  try { if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE) } catch { /* ignore */ }
 }
 
 // ─── Session type & cache ────────────────────────────────────────────
@@ -125,7 +207,19 @@ function startLogin(): Promise<Session> {
     return loginInFlight
   }
 
-  const attempt: Promise<Session> = loginViaBrowser()
+  const attempt: Promise<Session> = (async () => {
+    // Several MCP clients (Claude Code, Claude Desktop) each run their own
+    // copy of this server, so the in-process guard above cannot see a login
+    // happening in a sibling process. Re-read the Keychain first: if one of
+    // them finished logging in since we last looked, reuse that token instead
+    // of opening a second browser window and asking for the password again.
+    const fresh = keychainLoad()
+    if (fresh && !isExpired(fresh)) {
+      console.error('[auth] Another process already logged in — reusing its token.')
+      return fresh
+    }
+    return loginViaBrowser()
+  })()
     .then((session) => {
       cached = session
       return session
