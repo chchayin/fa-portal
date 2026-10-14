@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import http from 'http'
 import { z } from 'zod'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -42,6 +44,11 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
 
+// Factory, not a module-level singleton: stateless HTTP mode needs a fresh
+// McpServer+transport pair per request (the SDK throws if a stateless
+// transport is reused — see the --http branch in main() below), so this has
+// to be callable more than once.
+function createServer(): McpServer {
 const server = new McpServer({
   name: 'flowaccount',
   version: pkg.version,
@@ -541,6 +548,9 @@ server.tool(
   })
 )
 
+  return server
+}
+
 // ─── Start server ─────────────────────────────────────────────────────
 
 async function main() {
@@ -563,8 +573,33 @@ async function main() {
     console.error('[fa-portal] Call refresh_session to log in — no browser will open until you do.')
   }
 
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
+  const httpPortArg = process.argv.find((a) => a.startsWith('--http'))
+  const httpPort = httpPortArg ? Number(httpPortArg.split('=')[1] ?? process.env.MCP_PORT ?? 8766) : null
+
+  if (httpPort) {
+    // Stateless mode: tool calls don't depend on a per-connection session,
+    // auth state lives in the Keychain already. The SDK requires a fresh
+    // McpServer+transport pair per request in this mode (reusing one causes
+    // message-ID collisions between overlapping calls) — this is still a
+    // single long-lived *process* serving every client connection, just not
+    // a single long-lived transport object.
+    const httpServer = http.createServer(async (req, res) => {
+      if (req.url !== '/mcp') {
+        res.writeHead(404).end()
+        return
+      }
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+      res.on('close', () => transport.close())
+      await createServer().connect(transport)
+      await transport.handleRequest(req, res)
+    })
+    httpServer.listen(httpPort, '127.0.0.1', () => {
+      console.error(`[fa-portal] Listening on http://127.0.0.1:${httpPort}/mcp`)
+    })
+  } else {
+    const transport = new StdioServerTransport()
+    await createServer().connect(transport)
+  }
 }
 
 main().catch((err) => {
