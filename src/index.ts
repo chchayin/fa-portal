@@ -102,6 +102,11 @@ const LineItemSchema = z.object({
   vatRate: z.number().optional().describe('VAT rate: 0 or 7 (default 7)'),
 })
 
+const POLineItemSchema = LineItemSchema.extend({
+  discount: z.number().nonnegative().optional()
+    .describe('Line discount (ส่วนลด): a percent or a THB amount, per discountType. Omit for none'),
+})
+
 // ─── Session tools ────────────────────────────────────────────────────
 
 server.tool(
@@ -174,7 +179,9 @@ server.tool(
   {
     contactName: z.string().describe('Vendor / supplier name'),
     contactId: z.number().int().optional().describe('Contact ID from search_contacts — preferred over name lookup'),
-    items: z.array(LineItemSchema).min(1).describe('Line items'),
+    items: z.array(POLineItemSchema).min(1).describe('Line items'),
+    discountType: z.enum(['percent', 'amount']).optional()
+      .describe("How items[].discount is expressed: 'percent' (default) or 'amount' in THB. Applies to every item — FlowAccount allows one type per document"),
     note: z.string().optional().describe('Internal note (โน้ตภายในบริษัท)'),
     remarks: z.string().optional().describe('External note on printed document (หมายเหตุ)'),
     reference: z.string().optional().describe('Reference document number e.g. LN6016774800H2'),

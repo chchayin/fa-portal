@@ -39,50 +39,79 @@ export interface LineItem {
   pricePerUnit: number
   unitName?: string
   vatRate?: number // 0 or 7
+  discount?: number // percent or THB, per DiscountType
 }
 
-export function buildItems(items: LineItem[]) {
-  return items.map((item, i) => ({
-    no: i,
-    name: item.name,
-    description: item.description ?? null,
-    quantity: item.quantity,
-    pricePerUnit: item.pricePerUnit,
-    total: item.quantity * item.pricePerUnit,
-    unitName: item.unitName ?? 'ชิ้น',
-    vatRate: item.vatRate ?? 7,
-    productDiscountTypes: 1,
-    documentWithholdingTaxType: 1,
-    discountPerItem: 0,
-    discountPerItemValue: 0,
-    withHeldPerItem: 0,
-    withHeldPerItemValue: 0,
-    productMasterId: 0,
-    type: 1,
-    unitId: 0,
-    expenseCategoryId: 0,
-    sellChartOfAccountId: 0,
-    buyChartOfAccountId: 0,
-  }))
+/** How line-item discounts are expressed. FlowAccount allows one type per document. */
+export type DiscountType = 'percent' | 'amount'
+
+// FlowAccount productDiscountTypes / documentDiscountTypes codes
+const DISCOUNT_TYPE_CODE: Record<DiscountType, number> = { percent: 1, amount: 3 }
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+
+export function buildItems(items: LineItem[], discountType: DiscountType = 'percent') {
+  return items.map((item, i) => {
+    const gross = round2(item.quantity * item.pricePerUnit)
+    const discount = item.discount ?? 0
+    if (discount < 0) throw new Error(`Item ${i + 1} (${item.name}): discount must not be negative`)
+    if (discountType === 'percent' && discount > 100) {
+      throw new Error(`Item ${i + 1} (${item.name}): discount ${discount}% exceeds 100%`)
+    }
+    const discountValue = discountType === 'percent' ? round2(gross * discount / 100) : round2(discount)
+    if (discountValue > gross) {
+      throw new Error(`Item ${i + 1} (${item.name}): discount ${discountValue} exceeds line total ${gross}`)
+    }
+    return {
+      no: i,
+      name: item.name,
+      description: item.description ?? null,
+      quantity: item.quantity,
+      pricePerUnit: item.pricePerUnit,
+      total: round2(gross - discountValue), // net of discount, as FlowAccount stores it
+      unitName: item.unitName ?? 'ชิ้น',
+      vatRate: item.vatRate ?? 7,
+      productDiscountTypes: DISCOUNT_TYPE_CODE[discountType],
+      documentWithholdingTaxType: 1,
+      discountPerItem: discount,
+      discountPerItemValue: discountValue,
+      withHeldPerItem: 0,
+      withHeldPerItemValue: 0,
+      productMasterId: 0,
+      type: 1,
+      unitId: 0,
+      expenseCategoryId: 0,
+      sellChartOfAccountId: 0,
+      buyChartOfAccountId: 0,
+    }
+  })
 }
 
 // ─── Totals (single pass) ─────────────────────────────────────────────
 
 export function calculateTotals(productItems: ReturnType<typeof buildItems>) {
-  let subTotal = 0
+  let subTotal = 0 // gross, before line discounts
+  let discountTotal = 0
   let vatAmount = 0
   let hasVat = false
   for (const item of productItems) {
-    subTotal += item.total
+    subTotal += item.total + item.discountPerItemValue
+    discountTotal += item.discountPerItemValue
     if (item.vatRate > 0) {
       vatAmount += Math.round(item.total * item.vatRate) / 100
       hasVat = true
     }
   }
+  subTotal = round2(subTotal)
+  vatAmount = round2(vatAmount)
+  discountTotal = round2(discountTotal)
+  const totalAfterDiscount = round2(subTotal - discountTotal)
   return {
     subTotal,
+    discountTotal,
+    totalAfterDiscount,
     vatAmount,
-    grandTotal: subTotal + vatAmount,
+    grandTotal: round2(totalAfterDiscount + vatAmount),
     docVatRate: hasVat ? 7 : 0,
   }
 }
@@ -129,6 +158,7 @@ export interface CommonDocFields {
   contactName: string
   contactId?: number
   items: LineItem[]
+  discountType?: DiscountType // how items[].discount is expressed (default 'percent')
   note?: string          // โน้ตภายในบริษัท (internal note)
   remarks?: string       // หมายเหตุ (external note shown on printed document)
   reference?: string
@@ -164,8 +194,9 @@ export async function buildFullDoc(
     getDefaultWarehouseId(),
   ])
 
-  const productItems = buildItems(fields.items)
-  const { subTotal, grandTotal, docVatRate, vatAmount } = calculateTotals(productItems)
+  const discountType = fields.discountType ?? 'percent'
+  const productItems = buildItems(fields.items, discountType)
+  const { subTotal, discountTotal, totalAfterDiscount, grandTotal, docVatRate, vatAmount } = calculateTotals(productItems)
 
   return {
     isComplieAccountingRule: false,
@@ -208,7 +239,7 @@ export async function buildFullDoc(
     companyStateChange: false,
     publishedOn: toDocDate(fields.publishedOn),
     dueDate: toDocDate(fields.dueDate),
-    discount: 0,
+    discount: discountTotal,
     discountPercentage: 0,
     discountAmount: 0,
     creditDays: 0,
@@ -223,7 +254,7 @@ export async function buildFullDoc(
     isManualWHT: false,
     isWithholding: true,
     isBatchDocument: false,
-    documentDiscountTypes: 1,
+    documentDiscountTypes: DISCOUNT_TYPE_CODE[discountType],
     documentWithholdingTaxTypes: 1,
     useInlineWithholdingTax: true,
     useInlineDiscount: true,
@@ -263,15 +294,15 @@ export async function buildFullDoc(
     isVatInclusive: false,
     isVat: true,
     subTotal,
-    totalAfterDiscount: subTotal,
+    totalAfterDiscount,
     vatValue: vatAmount,
     exemptAmount: 0,
-    vatableAmount: subTotal,
+    vatableAmount: totalAfterDiscount,
     vatAmount,
     grandTotal,
-    totalExcludingVat: subTotal,
+    totalExcludingVat: totalAfterDiscount,
     total: grandTotal,
-    inlineDiscountValue: 0,
+    inlineDiscountValue: discountTotal,
     inlineVatValue: vatAmount,
     withholdingTaxAmount: 0,
     originalWithholdingTaxAmount: 0,
