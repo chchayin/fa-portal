@@ -52,6 +52,8 @@ Optional fields: `publishedOn`, `dueDate` (YYYY-MM-DD), `note` (internal), `rema
 
 **Quotation-specific**: `creditDays` (default 30). The `dueDate` defaults to `publishedOn + creditDays` if not explicitly set.
 
+**Purchase-order-specific — line discounts (ส่วนลด)**: each item accepts an optional `discount`, and the document takes a `discountType` of `percent` (default) or `amount` (THB). One type applies to every line, because FlowAccount allows only one discount type per document. Example: `discountType: "percent"`, item `discount: 35` → 35% off that line. VAT is calculated on the discounted line total. A percent over 100, or an amount larger than the line total, is rejected.
+
 ### Creating withholding tax (ใบหัก ณ ที่จ่าย)
 
 This is different from other documents:
